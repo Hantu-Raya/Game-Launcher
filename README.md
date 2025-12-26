@@ -73,24 +73,28 @@ The scripts automatically handle **Fullscreen Optimizations**.
 
 ## ⚙️ Customization
 
-You can easily modify the behavior of the launchers by editing the variables at the top of each `.bat` file:
+> [!IMPORTANT] > **No coding knowledge required!** You can tune the launcher by editing a few simple numbers at the very top of the `.bat` file.
 
-### 🖥️ Display Overrides
+### 📝 How to Edit
 
-- `$force_width` / `$force_height`: Set your desired game resolution (e.g., `1728` x `1080`). Set to `-1` for auto-detection.
-- `$force_refresh`: Force a specific refresh rate (e.g., `240`).
-- `$force_exclusive`: Set to `1` for True Exclusive Fullscreen, or `0` for Borderless/Desktop Friendly mode.
+1.  **Right-click** on your chosen `.bat` file (e.g., `both.bat`).
+2.  Select **Edit** (this opens Notepad).
+3.  Change the numbers next to the settings listed below.
+4.  **Save (Ctrl+S)** and close.
 
-### 🕹️ Launcher Behavior
+### 🎛️ Settings Reference
 
-- `$auto_start`: Set to `1` to bypass all initial setup checks and launch the game instantly.
-- `$unify_cfg`: Set to `1` to share the same video/keybind configs across all Steam accounts on your PC.
-- `$do_not_set_desktop_res_to_match_game`: Set to `1` if you only want the Steam optimizations and don't want the script to touch your desktop resolution.
+| Setting            | Default Value | What it does                                                               |
+| :----------------- | :------------ | :------------------------------------------------------------------------- |
+| `$force_width`     | `1728`        | The horizontal width of the game. Use `-1` for auto.                       |
+| `$force_height`    | `1080`        | The vertical height of the game. Use `-1` for auto.                        |
+| `$force_refresh`   | `165`         | Your monitor's refresh rate. Use `-1` for auto.                            |
+| `$force_exclusive` | `1`           | `1` = Maximum Performance (Fullscreen). `0` = Friendlier for Alt-Tabs.     |
+| `$auto_start`      | `1`           | `1` = Instant launch. `0` = Shows menu first.                              |
+| `$unify_cfg`       | `1`           | `1` = Uses the same settings for all of your Steam accounts.               |
+| `$do_not_match`\*  | `1`           | `1` = Script only optimizes Steam. `0` = Script also manages your Desktop. |
 
-### 🚀 Advanced Tweaks
-
-- `$STEAM_OPTIMIZED_ARGS`: Modify this string in `both.bat` to add or remove Steam client stripping flags.
-- `$extra_launch_options`: Located within the game selection logic, this allows you to add custom game-specific flags like `-vulkan` or `-high`.
+_\*Found as `$do_not_set_desktop_res_to_match_game` in the file._
 
 ---
 
