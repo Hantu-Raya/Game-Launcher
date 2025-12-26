@@ -45,22 +45,12 @@ Derived from the original scripts by [AveYo](https://github.com/AveYo/Gaming/blo
 
 ---
 
-## 🚀 How to Run
+### ⚡ Quick Start (30 Seconds)
 
-### 1. Installation
-
-Simply download the script(s) and place them anywhere. On first run, the script will:
-
-1.  Locate your Steam installation via the Registry.
-2.  Perform a **Critical Path Validation** to ensure the game is installed and accessible.
-3.  Extract and compile the embedded **SetRes** library (`SetRes.dll`) using `csc.exe`.
-4.  Self-install a copy to your game folder for faster subsequent launches.
-
-### 2. Basic Usage
-
-- **Manual Launch**: Double-click any `.bat` file.
-- **Universal Launch**: Run `both.bat` to see the game selection menu.
-- **Auto-Start**: Run with `$auto_start = 1` to skip menus and launch immediately.
+1.  **Download** the script (`cs2.bat`, `dead.bat`, or `both.bat`).
+2.  **Right-click -> Edit** the file to check your settings (Resolution/Hz).
+3.  **Double-click** to run.
+    - _Note: On the first run, you might see a black window with scrolling text for 5-10 seconds. This is normal!_
 
 ### 3. FSO Management
 
@@ -71,30 +61,29 @@ The scripts automatically handle **Fullscreen Optimizations**.
 
 ---
 
-## ⚙️ Customization
+## ⚙️ Customization (Make it Yours)
 
-> [!IMPORTANT] > **No coding knowledge required!** You can tune the launcher by editing a few simple numbers at the very top of the `.bat` file.
+> [!TIP] > **Don't be afraid!** You are only changing simple numbers at the top of the file. You cannot break your PC.
 
-### 📝 How to Edit
+### 📝 Step-by-Step Guide
 
-1.  **Right-click** on your chosen `.bat` file (e.g., `both.bat`).
-2.  Select **Edit** (this opens Notepad).
-3.  Change the numbers next to the settings listed below.
-4.  **Save (Ctrl+S)** and close.
+1.  **Right-click** the file (e.g., `dead.bat`) and select **Edit**.
+    - _If asked, select "Notepad" as the program._
+2.  Look for the **User Settings** block at the very top.
+3.  Change the numbers to match your preference.
+4.  **Save** (Ctrl+S) and close.
 
-### 🎛️ Settings Reference
+### 🎛️ Settings Cheat Sheet
 
-| Setting            | Default Value | What it does                                                               |
-| :----------------- | :------------ | :------------------------------------------------------------------------- |
-| `$force_width`     | `1728`        | The horizontal width of the game. Use `-1` for auto.                       |
-| `$force_height`    | `1080`        | The vertical height of the game. Use `-1` for auto.                        |
-| `$force_refresh`   | `165`         | Your monitor's refresh rate. Use `-1` for auto.                            |
-| `$force_exclusive` | `1`           | `1` = Maximum Performance (Fullscreen). `0` = Friendlier for Alt-Tabs.     |
-| `$auto_start`      | `1`           | `1` = Instant launch. `0` = Shows menu first.                              |
-| `$unify_cfg`       | `1`           | `1` = Uses the same settings for all of your Steam accounts.               |
-| `$do_not_match`\*  | `1`           | `1` = Script only optimizes Steam. `0` = Script also manages your Desktop. |
-
-_\*Found as `$do_not_set_desktop_res_to_match_game` in the file._
+| Setting              | Recommended | Description                                                       |
+| :------------------- | :---------- | :---------------------------------------------------------------- |
+| **$force_width**     | `-1`        | Your game width. `-1` uses your desktop default.                  |
+| **$force_height**    | `-1`        | Your game height. `-1` uses your desktop default.                 |
+| **$force_refresh**   | `-1`        | Your monitor's Hz. `-1` uses your desktop default.                |
+| **$force_exclusive** | `1`         | `1` gives FPS boost (Exclusive). `0` is faster for Alt-Tab.       |
+| **$auto_start**      | `1`         | `1` launches game instantly. `0` shows a menu first.              |
+| **$unify_cfg**       | `1`         | `1` copies your pro settings to _all_ logged-in Steam accounts.   |
+| **$do_not_match**    | `1`         | `1` = Optimize Steam only (Safer). `0` = Optimize Resolution too. |
 
 ---
 
