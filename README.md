@@ -70,6 +70,29 @@ The scripts automatically handle **Fullscreen Optimizations**.
 
 ---
 
+## ⚙️ Customization
+
+You can easily modify the behavior of the launchers by editing the variables at the top of each `.bat` file:
+
+### 🖥️ Display Overrides
+
+- `$force_width` / `$force_height`: Set your desired game resolution (e.g., `1728` x `1080`). Set to `-1` for auto-detection.
+- `$force_refresh`: Force a specific refresh rate (e.g., `240`).
+- `$force_exclusive`: Set to `1` for True Exclusive Fullscreen, or `0` for Borderless/Desktop Friendly mode.
+
+### 🕹️ Launcher Behavior
+
+- `$auto_start`: Set to `1` to bypass all initial setup checks and launch the game instantly.
+- `$unify_cfg`: Set to `1` to share the same video/keybind configs across all Steam accounts on your PC.
+- `$do_not_set_desktop_res_to_match_game`: Set to `1` if you only want the Steam optimizations and don't want the script to touch your desktop resolution.
+
+### 🚀 Advanced Tweaks
+
+- `$STEAM_OPTIMIZED_ARGS`: Modify this string in `both.bat` to add or remove Steam client stripping flags.
+- `$extra_launch_options`: Located within the game selection logic, this allows you to add custom game-specific flags like `-vulkan` or `-high`.
+
+---
+
 ## 🧠 Technical Deep Dive
 
 ### High-Precision Refresh Rates
