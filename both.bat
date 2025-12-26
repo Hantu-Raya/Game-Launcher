@@ -1,0 +1,1295 @@
+@(set "0=%~f0" '& set "2=%CD%" & set 1=%*) & powershell -nop -c .([scriptblock]::Create((gc -lit $env:0 -raw))) & exit /b ');.{
+
+#  --- UNIVERSAL DISPLAY SETTINGS (Applied to BOTH games) ---
+$force_width     = 1728
+$force_height    = 1080
+$force_refresh   = 165
+$force_screen    = -1
+$force_exclusive = 1   # 1 = Exclusive Fullscreen, 0 = Desktop Friendly
+$force_settings  = 1
+
+#  --- LAUNCHER CONFIGURATION ---
+$enable_fso      = 1   # Enable Fullscreen Optimizations (usually better for DX11/Vulkan)
+$rem_vid_options = 1   # Clean up old launch options from Steam
+$clear_verify    = 1   # Reset "Verify Integrity" flag to speed up crashes
+$add_to_library  = 0   # Add this script to Steam Library as a non-Steam game (disabled for faster load)
+$unify_cfg       = 0   # Use consistent configs across accounts (disabled for faster load)
+$auto_start      = 1   # 1 = Launch game immediately, 0 = Just set up environment
+
+#  --- SCRIPT BEHAVIOR ---
+$do_not_set_desktop_res_to_match_game = 1  # Set to 1 to disable resolution switching completely (optimized for low load)
+$verbose_switched_desktop_res_message = 0
+
+#  --- STEAM OPTIMIZATIONS (The "Nuclear" Option) ---
+#  These flags are applied when the script restarts Steam. They strip the client down to the bare metal.
+$STEAM_OPTIMIZED_ARGS = "-silent -quicklogin -forceservice -console -vgui -oldtraymenu -vrdisable -nofriendsui -no-dwrite -nointro -nobigpicture -nofasthtml -nocrashmonitor -noshaders -no-shared-textures -disablehighdpi " +
+                        "-cef-single-process -cef-disable-gpu -cef-disable-gpu-compositing -cef-disable-d3d11 -cef-disable-webgl -cef-force-software-draw -cef-disable-accelerated-2d-canvas " +
+                        "-cef-disable-audio-output -cef-disable-background-networking -cef-disable-background-timer-throttling -cef-disable-renderer-backgrounding " +
+                        "-cef-disable-features=AudioServiceOutOfProcess,TranslateUI,MediaRouter,OptimizationHints,PrivacySandboxSettings4,Prerender2,SpeculativeServiceWorkerStartOnQuery " +
+                        "-cef-max-old-space-size=128 -cef-disk-cache-size=50 -cef-disable-smooth-scrolling -nojoy -cef-force-32bit"
+
+#  --- GAME SELECTION MENU ---
+Write-Host " "
+Write-Host "  [1] Counter-Strike 2 " -ForegroundColor Cyan
+Write-Host "  [2] Deadlock "         -ForegroundColor Magenta
+Write-Host " "
+$choice = Read-Host "  Select Game (1 or 2)"
+
+if ($choice -eq '2') {
+    # DEADLOCK SETTINGS
+    $APPID       = 1422450
+    $APPNAME     = "deadlock"
+    $INSTALLDIR  = "Deadlock"
+    $MOD         = "citadel"
+    $GAMEBIN     = "bin\win64"
+    $WINDOWTITLE = "Deadlock"
+    $CFG_ENV     = "USRLOCALCITADEL"
+    
+    $video = @{
+      "setting.mat_vsync"                = "0"
+      "setting.videocfg_dynamic_shadows" = "1"
+    }
+    $extra_launch_options = @(
+        "-noreflex", "-noantilag", "-fastambient", "-dx11", "-noipx", "-nojoy", "-noheap", "-novid", "-noquicktime", 
+        "-limitvsconst", "-useforcedmparms", "-novr", "-favor_consistent_framerate", "-nosteamcontroller", 
+        "-particles 1", "-precachefontchars", "-high", "-dev", "-no_environment_maps", "+exec auto.cfg", 
+        "-m_rawinput 1", "-noassert", "-convars_visible_by_default", 
+        "+@panorama_min_comp_layer_cache_cost_TURNED_OFF 256", "-forcenovsync", "-mat_disable_bloom", 
+        "-nod3d9ex1", "-nohltv", "-no-browser", "+vprof_off", "+iv_off"
+    )
+} else {
+    # CS2 SETTINGS (Default)
+    $APPID       = 730
+    $APPNAME     = "cs2"
+    $INSTALLDIR  = "Counter-Strike Global Offensive"
+    $MOD         = "csgo"
+    $GAMEBIN     = "bin\win64"
+    $WINDOWTITLE = "Counter-Strike 2"
+    $CFG_ENV     = "USRLOCALCSGO"
+
+    $video = @{
+      "setting.mat_vsync"                = "0"
+      "setting.videocfg_dynamic_shadows" = "1"
+    }
+    $extra_launch_options = @(
+        "-nojoy", "-novid", "-high", "+exec autoexec.cfg"
+    )
+}
+
+#  --- COMMON VARIABLES ---
+$RUNNING     = "\\Software\\Valve\\Steam\\Apps\\$APPID/Running"
+$CFG_KEYS    = "${APPNAME}_user_keys_0_slot0.vcfg"
+$CFG_USER    = "${APPNAME}_user_convars_0_slot0.vcfg"
+$CFG_MACHINE = "${APPNAME}_machine_convars.vcfg"
+$CFG_VIDEO   = "${APPNAME}_video.txt"
+$scriptname  = "Universal_Launcher"
+$scriptdate  =  20251124
+
+#  --- START LOGIC ---
+$STEAM = resolve-path (gp "HKCU:\SOFTWARE\Valve\Steam").SteamPath; $REOPEN = 0
+if (-not (test-path "$STEAM\steam.exe") -or -not (test-path "$STEAM\steamapps\libraryfolders.vdf")) {
+  write-host " Steam not found! " -fore Black -back Yellow; sleep 7; return
+}
+
+#  --- HELPER FUNCTIONS ---
+function vdf_parse {
+  param([string[]]$vdf, [ref]$line = ([ref]0), [string]$re = '\A\s*("(?<k>[^"]+)"|(?<b>[\{\}]))\s*(?<v>"(?:\\"|[^"])*")?\Z')
+  $obj = [ordered]@{}
+  while ($line.Value -lt $vdf.count) {
+    if ($vdf[$line.Value] -match $re) {
+      if ($matches.k) { $key = $matches.k }
+      if ($matches.v) { $obj.$key = $matches.v }
+      elseif ($matches.b -eq '{') { $line.Value++; $obj.$key = vdf_parse -vdf $vdf -line $line }
+      elseif ($matches.b -eq '}') { break }
+    }
+    $line.Value++
+  }
+  return $obj
+}
+function vdf_print {
+  param($vdf, [ref]$indent = ([ref]0))
+  if ($vdf -isnot [System.Collections.Specialized.OrderedDictionary]) {return}
+  foreach ($key in $vdf.Keys) {
+    if ($vdf[$key] -is [System.Collections.Specialized.OrderedDictionary]) {
+      $tabs = "$_t" * $indent.Value
+      write-output "$tabs$_q$key$_q$_n$tabs{$_n"
+      $indent.Value++; vdf_print -vdf $vdf[$key] -indent $indent; $indent.Value--
+      write-output "$tabs}$_n"
+    } else {
+      $tabs = "$_t" * $indent.Value
+      write-output "$tabs$_q$key$_q$_t$_t$($vdf[$key])$_n"
+    }
+  }
+}
+function vdf_mkdir {
+  param($vdf, [string]$path = ''); $s = $path.split('\',2); $key = $s[0]; $recurse = $s[1]
+  if ($key -and $vdf.Keys -notcontains $key) { $vdf.$key = [ordered]@{} }
+  if ($recurse) { vdf_mkdir $vdf[$key] $recurse }
+}
+# Define escape characters once at script scope for performance
+function reload_escape_chars {
+  $c = @{_0 = 0; _1 = 1; _2 = 2; _8 = 8; _t = 9; _n = 10; _f = 12; _r = 13; _q = 34; _s = 36}
+  $c.getenumerator() | foreach { set-variable -name $_.Name -value $([char]($_.Value)) -scope Script -force -ea 0}
+}
+reload_escape_chars
+
+#  --- DETECT USER & PATHS ---
+$USRID = (gp "HKCU:\Software\Valve\Steam\ActiveProcess" -ea 0).ActiveUser
+if ($USRID -lt 1) {
+  $file = "$STEAM\config\loginusers.vdf"; $vdf = vdf_parse (gc $file -force)
+  foreach ($id64 in $vdf["users"].Keys) { if ($vdf["users"][$id64]["MostRecent"] -eq '"1"') {
+      $id3 = ([long]$id64) - 76561197960265728; $USRID = ($id3--,$id3)[($id3 % 2) -eq 0]
+  } }
+}
+if ($USRID -lt 1) {
+  pushd "$STEAM\userdata"
+  $lconf = (dir -filter "localconfig.vdf" -Recurse | sort LastWriteTime -Descending | Select -First 1).DirectoryName
+  $USRID = split-path (split-path $lconf) -leaf
+  popd
+}
+$USRCLOUD = "$STEAM\userdata\$USRID"
+$USRLOCAL = "$STEAM\userdata\$USRID\$APPID\local"
+
+$file = "$STEAM\steamapps\libraryfolders.vdf"; $vdf = vdf_parse (gc $file -force)
+foreach ($nr in $vdf["libraryfolders"].Keys) {
+  if ($vdf["libraryfolders"][$nr]["apps"] -and $vdf["libraryfolders"][$nr]["apps"]["$APPID"]) {
+    $l = resolve-path $vdf["libraryfolders"][$nr]["path"].Trim('"'); $i = "$l\steamapps\common\$INSTALLDIR"
+    if (test-path "$i\game\$MOD\steam.inf") { $STEAMAPPS = "$l\steamapps"; $GAMEROOT = "$i\game"; $GAME = "$i\game\$MOD" }
+  }
+}
+
+# Critical path validation to prevent null reference failures
+if (-not $GAMEROOT -or -not (test-path "$GAMEROOT")) {
+  write-host " $INSTALLDIR not found in any Steam library folder!" -fore Black -back Red
+  sleep 7; return
+}
+
+#  --- SELF-INSTALL TO GAME FOLDER ---
+$file = "$GAMEROOT\$scriptname.bat"
+if ($env:0 -ne $file) {
+  set-content -force $file $(
+    @( '@(set "0=%~f0" ''& set "2=%CD%" & set 1=%*) & powershell -nop -' +
+    'c .([scriptblock]::Create((gc -lit $env:0 -raw))) & exit /b '');.{' +
+    $($MyInvocation.MyCommand.Definition) +
+    '} #_press_Enter_if_pasted_in_powershell' ) -split'\r?\n'
+  )
+}
+
+#  --- CLOSE PREVIOUS INSTANCES ---
+# Signal Steam that the application state is being updated by the launcher
+$reg = $RUNNING.Replace('\\','\')-split'/'; $key = $reg[0]; $val = $reg[1]; $old = (gp "HKCU:$key").$val; 
+sp "HKCU:$key" $val 2; sleep -m 250; sp "HKCU:$key" $val $old; [Console]::Title = "$scriptname ($APPNAME)"
+
+pushd -lit ~
+
+#  --- UNIFY CONFIGS ---
+$ENV_M = [Environment]::GetEnvironmentVariable($CFG_ENV,2)
+if ($ENV_M) {
+  write-host " $CFG_ENV env is defined at machine level. unable to override cfg location" -fore Yellow
+foreach ($cfgFile in $CFG_KEYS,$CFG_USER,$CFG_MACHINE,$CFG_VIDEO) {
+  if (-not (test-path "$ENV_M\cfg\$cfgFile")) { robocopy "$USRCLOUD\$APPID\local\cfg/" "$ENV_M\cfg/" $cfgFile /XO >'' 2>&1 }
+}
+  $USRLOCAL = "$ENV_M"
+  0,1 |foreach { [Environment]::SetEnvironmentVariable($CFG_ENV,"",$_) }
+}
+$ENV_U = [Environment]::GetEnvironmentVariable($CFG_ENV,1)
+if ($ENV_U -and $ENV_U -ne "$GAME" -and ((gp "HKCU:\Software\Valve\Steam\ActiveProcess" -ea 0).ActiveUser -gt 0)) {
+  write-host " closing Steam to refresh $CFG_ENV env " -fore Yellow
+  start "$STEAM\Steam.exe" -args '-shutdown' -wait; sleep 2
+  Wait-Process -Name 'steam' -Timeout 10 -ErrorAction SilentlyContinue
+}
+if ($ENV_U) {
+foreach ($cfgFile in $CFG_KEYS,$CFG_USER,$CFG_MACHINE,$CFG_VIDEO) {
+  if (test-path "$ENV_U\cfg\$cfgFile") { robocopy "$ENV_U\cfg/" "$GAME\cfg/" $cfgFile /XO >'' 2>&1 }
+  if (-not (test-path "$GAME\cfg\$cfgFile")) { robocopy "$USRCLOUD\$APPID\local\cfg/" "$GAME\cfg/" $cfgFile /XO >'' 2>&1 }
+}
+  $USRLOCAL = "$GAME"
+}
+if (!$ENV_M) { 0,1 |foreach { [Environment]::SetEnvironmentVariable($CFG_ENV,("","$GAME")[$unify_cfg -eq 1],$_) } }
+
+#  --- RESOLUTION LOGIC ---
+$exclusive = 0; $screen = 0; $width = 0; $height = 0; $refresh = 0; $numer = -1; $denom = -1
+$CFG_VIDEO = "$USRLOCAL\cfg\$CFG_VIDEO"
+
+$file = "$CFG_VIDEO"; if (test-path $file) {
+  $vdf = vdf_parse (gc $file -force); $cfg = $vdf["video.cfg"]
+  if ($cfg["setting.fullscreen"] -match '"([^"]*)"')              { $exclusive = [int]$matches[1] }
+  if ($cfg["setting.monitor_index"] -match '"([^"]*)"')           { $screen    = [int]$matches[1] }
+  if ($cfg["setting.defaultres"] -match '"([^"]*)"')              { $width     = [int]$matches[1] }
+  if ($cfg["setting.defaultresheight"] -match '"([^"]*)"')        { $height    = [int]$matches[1] }
+  if ($cfg["setting.refreshrate_numerator"] -match '"([^"]*)"')   { $numer     = [int]$matches[1] }
+  if ($cfg["setting.refreshrate_denominator"] -match '"([^"]*)"') { $denom     = [int]$matches[1] }
+  if ($numer -gt 0 -and $denom -gt 0) { $refresh = [decimal]$numer / $denom }
+}
+
+$file = "$USRCLOUD\config\localconfig.vdf"; $vdf = vdf_parse (gc $file -force)
+vdf_mkdir $vdf "UserLocalConfigStore\Software\Valve\Steam\Apps\$APPID"
+$lo = $($vdf["UserLocalConfigStore"]["Software"]["Valve"]["Steam"]["Apps"]["$APPID"]["LaunchOptions"]+'').Trim(' "')
+if ($lo -ne '') {
+  if ($lo -match '-fullscreen\s?')            { $exclusive = 1 }
+  if ($lo -match '-sdl_displayindex\s+(\d+)') { $screen    = [int]$matches[1] }
+  if ($lo -match '-w(idth)?\s+(\d+)')         { $width     = [int]$matches[2] }
+  if ($lo -match '-h(eight)?\s+(\d+)')        { $height    = [int]$matches[2] }
+  if ($lo -match '-r(efresh)?\s+([\d.]+)')    { $refresh   = [decimal]$matches[2] }
+}
+
+if ($force_exclusive -ge 0) { $exclusive = $force_exclusive }
+if ($force_screen -ge 0)    { $screen    = $force_screen }
+if ($force_width -ge 0)     { $width     = $force_width }
+if ($force_height -ge 0)    { $height    = $force_height }
+if ($force_refresh -ge 0)   { $refresh   = $force_refresh }
+if ($refresh -gt 0) {
+  # Calculate high-precision numerator for Steam's fixed-point Hz format (1000 base)
+  $denom = 1000; $numer = [int]([math]::Round($refresh * $denom))
+}
+
+#  --- INIT SETRES LIBRARY ---
+$library1 = "SetRes"; $version1 = "2025.4.17.0"; $about1 = "alt-tab fix"; $path1 = "$GAMEROOT\$library1.dll"
+if ((gi $path1 -force -ea 0).VersionInfo.FileVersion -ne $version1) { del $path1 -force -ea 0 } ; if (-not (test-path $path1)) {
+  mkdir "$GAMEROOT" -ea 0 >'' 2>&1; pushd $GAMEROOT; " one-time initialization of $library1 library..."
+  set-content "$GAMEROOT\$library1.cs" $(($MyInvocation.MyCommand.Definition -split '<#[:]LIBRARY1[:].*')[1])
+  $clr = $PSVersionTable.PSVersion.Major; if ($clr -gt 4) { $clr = 4 }; $framework = "$env:SystemRoot\Microsoft.NET\Framework"
+  # Optimized csc lookup: only runs when compilation is needed
+  $csc = (dir $framework -filter "csc.exe" -Recurse |where {$_.PSPath -like "*v${clr}.*"}).FullName
+  start $csc -args "/out:$library1.dll /target:library /platform:anycpu /optimize /nologo $library1.cs" -nonew -wait; popd
+}
+try {Import-Module $path1} catch {del $path1 -force -ea 0; " ERROR importing $library1, run script again! "; sleep 7; return }
+
+$display = [AveYo.SetRes]::Init($screen)
+$sdl_idx = $display[0];  $screen = $display[1];  $primary = $display[2] -gt 0;  $multimon = $display[3] -gt 1
+
+if ($env:SetResBack) {
+  $restore = $env:SetResBack -split ','
+  if ($restore.Count -eq 5) {
+    try {
+      # Use the captured values to restore resolution if the environment variable exists (recovery path)
+      $c = [AveYo.SetRes]::Change(0, [int]$restore[1], [int]$restore[2], [int]$restore[3], [decimal]$restore[4])
+    } catch {
+      write-host " WARNING: Failed to restore previous resolution from SetResBack env var" -fore Yellow
+    }
+  }
+  0,1 |foreach { [Environment]::SetEnvironmentVariable("SetResBack","",$_) }
+}
+
+$oldres  = [AveYo.SetRes]::List(1, $screen)
+
+# Capture original resolution constants BEFORE any change attempt to avoid "snapping" bugs
+$restore_width   = $oldres[2]
+$restore_height  = $oldres[3]
+$restore_refresh = $oldres[4]
+
+if ($width   -le 0) { $width  = $oldres[2] }
+if ($height  -le 0) { $height = $oldres[3] }
+if ($refresh -le 0) { $max_refresh = [AveYo.SetRes]::List(0, $screen, $width, $width, $height); $refresh = $max_refresh[7] }
+$newres  = [AveYo.SetRes]::Change(1, $screen, $width, $height, $refresh, 1)
+$width   = $newres[5]
+$height  = $newres[6]
+$refresh = $newres[7]
+
+if ($do_not_restore_res_use_max_available -ge 1) {
+  # Override: Restore to the monitor's MAXIMUM supported resolution instead of the original state
+  $restore_width = $oldres[5]; $restore_height = $oldres[6]; $restore_refresh = $oldres[7]
+}
+$sameres = $width -eq $restore_width -and $height -eq $restore_height -and $refresh -eq $restore_refresh
+$ratio   = $width / $height
+if ($ratio -le 4/3) {$ar = 0} elseif ($ratio -le 16/10) {$ar = 2} elseif ($ratio -le 16/8.9) {$ar = 1} else {$ar = 3}
+$mode = "$width x ".PadLeft(7) + "$height ".Padleft(5) + "${refresh}Hz".PadLeft(5)
+$rend = ('Desktop-friendly','Exclusive')[$exclusive -gt 0]; if ($enable_fso -gt 0) { $rend += ' + FSO' }
+$video_full = ('-coop_fullscreen','-fullscreen')[$exclusive -ge 1]
+$video_mode = "$video_full -width $width -height $height -refresh $refresh -sdl_displayindex $sdl_idx "
+
+write-host " $screen $mode $rend mode requested" -fore Yellow
+write-host " $video_mode" -fore Green
+write-host " $CFG_VIDEO" -fore Gray
+write-host " $GAME\cfg\autoexec.cfg" -fore Gray
+
+#  --- APPLY VIDEO SETTINGS ---
+reload_escape_chars
+if ($force_settings -le 0) { $video = @{} }
+$video["setting.fullscreen"]                   = (0,1)[$exclusive -eq 1]
+$video["setting.coop_fullscreen"]              = (0,1)[$exclusive -ne 1]
+$video["setting.nowindowborder"]               = 1
+$video["setting.fullscreen_min_on_focus_loss"] = 0
+$video["setting.high_dpi"]                     = 1
+$video["setting.defaultres"]                   = $width
+$video["setting.defaultresheight"]             = $height
+$video["setting.refreshrate_numerator"]        = $refresh
+$video["setting.refreshrate_denominator"]      = 1
+$video["setting.monitor_index"]                = $sdl_idx
+$video["setting.aspectratiomode"]              = $ar
+
+$file = "$CFG_VIDEO"
+if (!(test-path $file)) { set-content $file "${_q}video.cfg$_q$_n{$_n$_t${_q}Version$_q$_t$_t${_q}13$_q$_n}$_n" -nonewline }
+$vdf = vdf_parse (gc $file -force); $cfg = $vdf["video.cfg"]
+foreach ($k in $video.Keys) { $cfg[$k] = "$_q$($video.$k)$_q" }
+set-content $file (vdf_print $vdf) -nonewline
+
+$file = "$GAME\cfg\launcher.cfg"; $cfg = [System.Text.StringBuilder]''
+if ($convars) { foreach ($k in $convars.Keys) { [void]$cfg.AppendLine("$_q$k$_q $_q$($convars.$k)$_q") } }
+set-content $file $cfg.ToString() -force -ea 0
+
+$file = "$GAME\cfg\autoexec.cfg"; $add = "execifexists launcher // $APPNAME_Launcher convars"
+if (-not (test-path $file)) { [io.file]::writealltext($file, $add) }
+else { $cfg = [io.file]::readalltext($file); if ($cfg -notmatch $add) { [io.file]::writealltext($file, "$add$_r$_n$cfg") } }
+
+#  --- OVERRIDE STEAM LAUNCH OPTIONS ---
+$file = "$USRCLOUD\config\localconfig.vdf"; $vdf = vdf_parse (gc $file -force); $write = $false
+vdf_mkdir $vdf "UserLocalConfigStore\Software\Valve\Steam\Apps\$APPID"
+$lo = $($vdf["UserLocalConfigStore"]["Software"]["Valve"]["Steam"]["Apps"]["$APPID"]["LaunchOptions"]+'').Trim(' "')
+if ($rem_vid_options -ge 1 -and $lo -ne '') {
+  $lo_f = $false,''; $lo_c = $false,''; $lo_s = $false,''; $lo_w = $false,''; $lo_h = $false,''; $lo_r = $false,'' 
+  $o = '-w(idth)?\s+?(\d+)?\s?';         if ($lo -match $o) { $lo_w = $true,$matches[2]; $lo = $lo -replace $o }
+  $o = '-h(eight)?\s+?(\d+)?\s?';        if ($lo -match $o) { $lo_h = $true,$matches[2]; $lo = $lo -replace $o }
+  $o = '-r(efresh)?\s+?([\d.]+)?\s?';    if ($lo -match $o) { $lo_r = $true,$matches[2]; $lo = $lo -replace $o }
+  $o = '-sdl_displayindex\s+?(\d+)?\s?'; if ($lo -match $o) { $lo_s = $true,$matches[1]; $lo = $lo -replace $o }
+  $o = '-fullscreen\s?';                 if ($lo -match $o) { $lo_f = $true,1; $lo = $lo -replace $o }
+  $o = '-coop_fullscreen\s?';            if ($lo -match $o) { $lo_c = $true,1; $lo = $lo -replace $o }
+  if (($lo_w[0] -and $lo_w[1] -ne $width) -or ($lo_h[0] -and $lo_h[1] -ne $height) -or ($lo_r[0] -and $lo_r[1] -ne $refresh) -or
+      ($lo_s[0] -and $lo_s[1] -ne $sdl_idx) -or ($lo_f[0] -and $exclusive -ne 1)) { $write = $true } 
+  $lo = $lo -replace '\s+',' '
+}
+if ($write) {
+  if ((gp "HKCU:\Software\Valve\Steam\ActiveProcess" -ea 0).ActiveUser -gt 0) {
+    write-host " restarting steam to apply options... " -fore yellow
+    start "$STEAM\Steam.exe" -args "+app_stop $APPID +app_mark_validation $APPID 0 -shutdown" -wait; sleep 2
+    Wait-Process -Name 'steam' -Timeout 10 -ErrorAction SilentlyContinue
+    del "$STEAM\.crash" -force -ea 0; $REOPEN = 1
+  }
+  $vdf["UserLocalConfigStore"]["Software"]["Valve"]["Steam"]["Apps"]["$APPID"]["LaunchOptions"] = "$_q$lo$_q"
+  set-content $file (vdf_print $vdf) -nonewline
+}
+
+[Environment]::SetEnvironmentVariable("SetResBack", "$sdl_idx,$screen,$restore_width,$restore_height,$restore_refresh", 1)
+
+#  --- STEAM LIBRARY SHORTCUTS ---
+if ($add_to_library -gt 0) {
+  $file = "$USRCLOUD\config\shortcuts.vdf"; $cmd = "$env:systemroot\sysnative\cmd.exe"; $icon = "$GAMEROOT\bin\win64\$APPNAME.exe"
+  $lat1 = [Text.Encoding]::GetEncoding(28591); reload_escape_chars; $0000 = "$_0$_0$_0$_0"; $empty = "${_0}shortcuts$_0$_8$_8" 
+  if (!(test-path $file) -or (gi $file).Length -lt 15) { [io.file]::writeallbytes($file, $lat1.GetBytes($empty)) }
+  $bvdf = [io.file]::readalltext($file); $next = ($bvdf -split "AppName").count - 1
+  if ($bvdf -notmatch "$scriptname -") {
+    if ((gp "HKCU:\Software\Valve\Steam\ActiveProcess" -ea 0).ActiveUser -gt 0) {
+      start "$STEAM\Steam.exe" -args "+app_stop $APPID -shutdown" -wait; sleep 5
+      del "$STEAM\.crash" -force -ea 0; $REOPEN = 1
+    }
+    foreach ($start in "-auto","-manual") {
+      $geid = $lat1.GetString([BitConverter]::GetBytes([AveYo.SetRes]::GenAppId("$scriptname $start")))
+      $text = $_0 + "$($next++)$_0" + $_2 + "appid$_0$geid" + $_1 + "AppName$_0$scriptname $start$_0" +
+        $_1 + "Exe$_0$cmd$_0" + $_1 + "StartDir$_0$_0" + $_1 + "icon$_0$icon$_0" + $_1 + "ShortcutPath$_0$_0" +
+        $_1 + "LaunchOptions$_0/c $_q$GAMEROOT\$scriptname.bat$_q $start$_0"     + $_2 + "IsHidden$_0$0000" +
+        $_2 + "AllowDesktopConfig$_0$0000" + $_2 + "AllowOverlay$_0$0000" + $_2 + "OpenVR$_0$0000" +
+        $_2 + "Devkit$_0$0000" + $_1 + "DevkitGameID$_0$_0" +  $_2 + "DevkitOverrideAppID$_0$0000" +
+        $_2 + "LastPlayTime$_0$0000"  +  $_1 + "FlatpakAppID$_0$_0"  +  $_0 + "tags$_0" + $_1 + "0${_0}AveYo$_0" + "$_8$_8$_8$_8"
+      $link = ([io.file]::readallbytes($file) | select -skiplast 2) + $lat1.GetBytes($text)
+      [io.file]::writeallbytes($file, $link)
+    }
+  }
+}
+
+#  --- FSO TOGGLE ---
+$progr = "$GAMEROOT\$GAMEBIN\$APPNAME.exe"
+$flags = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+$found = (gi $flags -ea 0).Property -contains $progr
+$valid = $found -and (gp $flags)."$progr" -like '*DISABLEDXMAXIMIZEDWINDOWEDMODE*'
+if ($enable_fso -eq 0 -and (!$found -or !$valid)) {
+  write-host " disabling $APPNAME os fullscreen (un)optimizations"
+  if ($GAME) { ni $flags -ea 0; sp $flags $progr '~ DISABLEDXMAXIMIZEDWINDOWEDMODE HIGHDPIAWARE' -force -ea 0 }
+}
+if ($enable_fso -eq 1 -and $valid) {rp $flags $progr -force -ea 0}
+
+#  --- GAME LAUNCH COMMAND ---
+reload_escape_chars
+$AUTO  = "$STEAM_OPTIMIZED_ARGS -applaunch $APPID $video_mode $extra_launch_options"
+
+#  --- RESTART STEAM IF NEEDED ---
+if ($REOPEN -ge 1) {
+  ni "HKCU:\Software\Classes\.steam_min\shell\open\command" -force >''
+  sp "HKCU:\Software\Classes\.steam_min\shell\open\command" "(Default)" "$_q$STEAM\steam.exe$_q $STEAM_OPTIMIZED_ARGS"
+  $L = "$STEAM\.steam_min"; if (!(test-path $L)) { set-content $L "" } ; start explorer -args "$_q$L$_q"
+  write-host " reopening steam "
+}
+
+write-host
+write-host " waiting $WINDOWTITLE to match res on desktop then restore native on alt-tab ..." -fore Yellow
+
+if ($do_not_minimize_window_while_waiting -le 0) {
+  sleep 5; powershell -win 2 -nop -c ';'
+} 
+
+if ($auto_start -ge 1) {
+  ni "HKCU:\Software\Classes\.steam_$APPNAME\shell\open\command" -force >''
+  sp "HKCU:\Software\Classes\.steam_$APPNAME\shell\open\command" "(Default)" "$_q$STEAM\steam.exe$_q $AUTO"
+  $L = "$STEAM\.steam_$APPNAME"; if (!(test-path $L)) { set-content $L "" } ; start explorer -args "$_q$L$_q"
+}
+
+#  --- RESOLUTION WATCHER (Active / Passive) ---
+if ($do_not_set_desktop_res_to_match_game -le 0) {
+  $verbose = (0,1)[$verbose_switched_desktop_res_message -ge 1]
+  try {
+    [AveYo.SetRes]::Focus($verbose, $WINDOWTITLE, $CFG_VIDEO, $RUNNING, $screen, $restore_width, $restore_height, $restore_refresh)
+  } catch {
+    write-host " Watcher ended." -fore Gray
+  }
+  # Fallback
+  if (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) {
+    write-host " Waiting for $APPNAME process to close..." -fore Yellow
+    Wait-Process -Name $APPNAME -ErrorAction SilentlyContinue
+  }
+  write-host " Restoring Desktop Resolution..." -fore Green
+  [AveYo.SetRes]::Change(1, $screen, $restore_width, $restore_height, $restore_refresh, 0)
+} else {
+  # Passive Mode: Wait for game close
+  write-host " [Passive Mode] Waiting for game..." -fore Yellow
+  $retries = 0
+  while (-not (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) -and $retries -lt 30) { sleep -m 100; $retries++ }
+  if (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) {
+      write-host " Game running. Monitoring..." -fore Green
+      while (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) { sleep 1 }
+      write-host " Game closed. Restoring Resolution..." -fore Green
+      [AveYo.SetRes]::Change(0, $screen, $restore_width, $restore_height, $restore_refresh, 0)
+  }
+}
+              var devices = GetAllDisplayDevices();
+              var monitor = devices.FirstOrDefault(d => d.IsCurrent);
+              if (def_scr > 0 && def_scr <= devices.Count) monitor = devices.FirstOrDefault(d => d.MonitorIndex == def_scr);
+              RECT cR = new RECT(), mR = monitor.Bounds;
+              GetWindowRect(e.WindowHandle, out cR);            
+              bool intersect = (cR.left+16)<mR.right && (cR.right-16)>mR.left && (cR.top+16)<mR.bottom && (cR.bottom-16)>mR.top;
+              if (verbose > 0) { Console.WriteLine("{0}\t{1},{2},{3},{4}\t{5},{6},{7},{8}\t{9}", 
+                                lpT, cR.left,cR.right,cR.top,cR.bottom,  mR.left,mR.right,mR.top,mR.bottom,  intersect); }
+              if (intersect) { _lastevt = 0; Change(verbose, def_scr, def_width, def_height, def_refresh, 0); }
+            }
+          }
+        }
+      };
+
+      _filemon.Changed += (s, e) => { 
+      string reg_key = reg.Split('/')[0], reg_val = reg.Split('/')[1];
+      string wmi_query = "SELECT * FROM RegistryValueChangeEvent WITHIN 1 WHERE Hive = 'HKEY_USERS' AND KeyPath = '" +
+        System.Security.Principal.WindowsIdentity.GetCurrent().Owner.ToString() + reg_key + @"' AND ValueName='" + reg_val + @"'";
+      string reg_query = "HKEY_CURRENT_USER" + reg_key.Replace("\\\\", "\\");
+         _readcfg = true;
+      };
+
+      _regimon.EventArrived += (s, e) => { 
+        _running = (int)Microsoft.Win32.Registry.GetValue(reg_query, reg_val, 0);
+        if (!_started && _running == 1) {
+          _started = true;
+          if (verbose > 0) { Console.WriteLine("{0} started", title); }
+        } 
+        if (_started && _running == 0) {
+          _started = false; _lastevt = 0;
+          if (verbose > 0) { Console.WriteLine("{0} closed ", title); } 
+          Change(verbose, def_scr, def_width, def_height, def_refresh, 0);
+        } 
+        if (_running > 1) {
+          if (verbose > 0) { Console.WriteLine("lean and mean script by AveYo"); }
+          _started = false;
+          _cancelt.Cancel();
+        }
+      };
+      
+      _consoleCtrlHandler += s =>
+      {
+        if (_dispose) {
+          _dispose = false;            
+          _bookmon.TryUnbook();
+          _filemon.EnableRaisingEvents = false;
+          _regimon.Stop();
+          Change(verbose, def_scr, def_width, def_height, def_refresh, 0);
+          _bookmon.Dispose();
+          _filemon.Dispose();
+          _regimon.Dispose();
+        }
+        return false;   
+      };
+     
+      _bookmon.BookGlobal();
+      _filemon.EnableRaisingEvents = true;
+      _regimon.Start();
+      SetConsoleCtrlHandler(_consoleCtrlHandler, true);
+
+      while (!_cancelt.IsCancellationRequested) { if (_cancelt.Token.WaitHandle.WaitOne()) { break; } }
+      
+      _bookmon.TryUnbook();
+      _filemon.EnableRaisingEvents = false;
+      _regimon.Stop();
+      Change(verbose, def_scr, def_width, def_height, def_refresh, 0);
+      _bookmon.Dispose();
+      _filemon.Dispose();
+      _regimon.Dispose();
+      _dispose = false;
+    }
+
+    public static int[] Init(int Screen = -1)
+    {
+      SetProcessDpiAwareness(2); 
+      var devices = GetAllDisplayDevices();
+      var monitor = devices.FirstOrDefault(d => d.IsCurrent);
+      if (Screen > 0 && Screen <= devices.Count) monitor = devices.FirstOrDefault(d => d.MonitorIndex == Screen);
+      RECT cR = new RECT(), mR = monitor.Bounds;
+      GetWindowRect(consolehWnd, out cR);
+      int cW = cR.right - cR.left, cH = cR.bottom - cR.top;
+      int cL = mR.left + (mR.right - mR.left - cW)/2, cT = mR.top + (mR.bottom - mR.top - cH)/2;
+      MoveWindow(consolehWnd, cL, cT, cW, cH, true);
+      return new int[] { monitor.SDLIndex, monitor.MonitorIndex, monitor.IsPrimary ? 1 : 0, devices.Count };
+    }
+
+    public static int[] List(int Verbose = 1, int Screen = -1, int MinWidth = 1024, int MaxWidth = 16384, int MaxHeight = 16384)
+    {
+      var devices = GetAllDisplayDevices();
+      var monitor = devices.FirstOrDefault(d => d.IsCurrent);
+      if (Screen > 0 && Screen <= devices.Count) monitor = devices.FirstOrDefault(d => d.MonitorIndex == Screen);
+
+      if (Verbose != 0) foreach (var display in devices) Console.WriteLine(display.ToString());
+
+      var displayModes = GetAllDisplaySettings(monitor.DriverName);
+      var current      = GetCurrentDisplaySetting(monitor.DriverName);
+      IList<DisplaySettings> filtered = displayModes;
+
+      if (Verbose == 1)
+      {
+        filtered = displayModes
+          .Where(d => d.Width >= MinWidth && d.Width <= MaxWidth && d.Height <= MaxHeight && d.Orientation == current.Orientation)
+          .OrderByDescending(d => d.Width).ThenByDescending(d => d.Refresh)
+          .GroupBy(d => new {d.Width, d.Height}).Select(g => g.First()).ToList();
+      }
+      else if (Verbose == 2 || Verbose == 0 && MaxWidth != 16384)
+      {
+        filtered = displayModes
+          .Where(d => d.Width >= MinWidth && d.Width <= MaxWidth && d.Height <= MaxHeight)
+          .OrderByDescending(d => d.Width).ThenByDescending(d => d.Refresh).ToList();
+      }
+
+      if (filtered.Count == 0)
+        filtered.Add(current);
+
+      var max = filtered.Aggregate((top, atm) => {
+          return atm.Width > top.Width || atm.Height > top.Height ? atm :
+            atm.Width == top.Width && atm.Height == top.Height && atm.Refresh > top.Refresh ? atm : top;
+      });
+
+      foreach (var set in filtered)
+      {
+        if (set.Equals(current))
+        {
+          if (Verbose != 0) Console.WriteLine(set.ToString(true) + " [current]");
+        }
+        else
+        {
+          if (Verbose != 0) Console.WriteLine(set.ToString(true));
+        }
+      }
+      if (Verbose != 0) Console.WriteLine();
+      return new int[] { monitor.SDLIndex, monitor.MonitorIndex,
+        (int)current.Width, (int)current.Height, (int)current.Refresh, (int)max.Width, (int)max.Height, (int)max.Refresh };
+    }
+
+    public static int[] Change(int Verbose = 1, int Screen = -1, int Width = 0, int Height = 0, decimal Refresh = 0, int Test = 0)
+    {
+      var devices = GetAllDisplayDevices();
+      var monitor = devices.FirstOrDefault(d => d.IsCurrent);
+      if (Screen > 0 && Screen <= devices.Count) monitor = devices.FirstOrDefault(d => d.MonitorIndex == Screen);
+
+      var deviceName = monitor.DriverName;
+      var current    = GetCurrentDisplaySetting(deviceName);
+      
+      if (Width == 0 || Height == 0)
+      {
+        if (Verbose != 0) Console.WriteLine(" Width and Height parameters required.\n");
+        return new int[] { monitor.SDLIndex, monitor.MonitorIndex,
+          (int)current.Width, (int)current.Height, (int)current.Refresh, 0, 0, 0, 1 };
+      }
+
+      uint Orientation = 0, FixedOutput = (uint)(Test < 0 ? 1 : 0);
+      var displayModes = GetAllDisplaySettings(deviceName);
+      var filtered = displayModes
+        .Where(d => d.Width == Width && d.Height == Height && d.Orientation == current.Orientation)
+        .OrderByDescending(d => d.Width).ThenByDescending(d => d.Refresh).ToList();
+
+      var ref1 = filtered.FirstOrDefault(d => d.Refresh == (uint)Decimal.Truncate(Refresh));
+      var ref2 = filtered.FirstOrDefault(d => d.Refresh == (uint)Decimal.Truncate(Refresh + 1));
+      var set = Refresh == 0 ? filtered.FirstOrDefault() : ref1 != null ? ref1 : ref2 != null ? ref2 : filtered.FirstOrDefault();
+      if (set == null)
+      {
+        if (Verbose != 0) Console.WriteLine(" No matching display mode!\n");
+        set = current;
+        return new int[] { monitor.SDLIndex, monitor.MonitorIndex,
+          (int)set.Width, (int)set.Height, (int)set.Refresh, (int)set.Width, (int)set.Height, (int)set.Refresh, 2 };
+      }
+
+      try
+      {
+        DEVMODE mode = GetDeviceMode(deviceName);
+        mode.dmPelsWidth          = set.Width;
+        mode.dmPelsHeight         = set.Height;
+        mode.dmDisplayFrequency   = set.Refresh;
+        mode.dmDisplayOrientation = Orientation > 0 ? Orientation : set.Orientation;
+        mode.dmDisplayFixedOutput = FixedOutput > 0 ? FixedOutput : set.FixedOutput;
+        mode.dmFields             = DmFlags.DM_PELSWIDTH | DmFlags.DM_PELSHEIGHT;
+        if (Refresh > 0)     mode.dmFields |= DmFlags.DM_DISPLAYFREQUENCY;
+        if (Orientation > 0) mode.dmFields |= DmFlags.DM_DISPLAYORIENTATION;
+        
+        CdsFlags flags = CdsFlags.CDS_TEST | CdsFlags.CDS_NORESET | CdsFlags.CDS_UPDATEREGISTRY; 
+        if (FixedOutput > 0) flags |= CdsFlags.CDS_FULLSCREEN;
+
+        int result = ChangeDisplaySettingsEx(deviceName, ref mode, IntPtr.Zero, flags, IntPtr.Zero);
+        if (Test > 0)
+          return new int[] { monitor.SDLIndex, monitor.MonitorIndex,
+            (int)current.Width, (int)current.Height, (int)current.Refresh, (int)set.Width, (int)set.Height, (int)set.Refresh, 0 };
+        if (result != Const.SUCCESS)
+          throw new InvalidOperationException(string.Format("{0} : {1} = N/A", set.ToString(true), monitor.DisplayName));
+        
+        flags &= ~CdsFlags.CDS_TEST; flags &= ~CdsFlags.CDS_NORESET; flags |= CdsFlags.CDS_RESET;
+        result = ChangeDisplaySettingsEx(deviceName, ref mode, IntPtr.Zero, flags, IntPtr.Zero);
+        if (result != Const.SUCCESS)
+          throw new InvalidOperationException(string.Format("{0} : {1} = FAIL", set.ToString(true), monitor.DisplayName));
+
+        if (Verbose != 0) Console.WriteLine(string.Format("{0} : {1} = OK", set.ToString(true), monitor.DisplayName));
+        return new int[] { monitor.SDLIndex, monitor.MonitorIndex,
+          (int)current.Width, (int)current.Height, (int)current.Refresh, (int)set.Width, (int)set.Height, (int)set.Refresh, 0 };
+      }
+      catch(Exception ex)
+      {
+        if (Verbose != 0) Console.WriteLine(ex.Message);
+        return new int[] { monitor.SDLIndex, monitor.MonitorIndex,
+          (int)current.Width, (int)current.Height, (int)current.Refresh, 0, 0, 0, 3 };
+      }
+    }
+
+    public static uint GenAppId(string name)
+    {
+      return Vpk_Crc32.Compute(Encoding.UTF8.GetBytes(name)) | 0x80000000;
+    }
+
+    private static List<DisplayDevice> GetAllDisplayDevices()
+    {
+      var list = new List<DisplayDevice>();
+      uint idx = 0;
+      uint size = 256;
+      var device = new DISPLAY_DEVICE();
+      device.Initialize();
+
+      var currentCursorP = new POINTL();
+      GetCursorPos(out currentCursorP);
+      var currentMonitor = MonitorFromPoint(currentCursorP, Const.MONITOR_DEFAULTTONEAREST);
+      var currentMonInfo = new MONITORINFOEX();
+      currentMonInfo.Initialize();
+      var currentDevice = GetMonitorInfo(currentMonitor, ref currentMonInfo) ? currentMonInfo.szDevice : "";
+
+      var monitors = new List<DisplayInfo>();
+      EnumDisplayMonitors( IntPtr.Zero, IntPtr.Zero,
+        delegate (IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor,  IntPtr dwData)
+        {
+          var mi = new MONITORINFOEX();
+          mi.Initialize();
+          var success = GetMonitorInfo(hMonitor, ref mi);
+          if (success)
+          {
+            var di = new DisplayInfo();
+            di.Index      = monitors.Count + 1;
+            di.SDLIndex   = monitors.Count + 1;
+            di.DeviceName = mi.szDevice;
+            di.Width      = mi.rcMonitor.right - mi.rcMonitor.left;
+            di.Height     = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            di.Bounds     = mi.rcMonitor;
+            di.WorkArea   = mi.rcWork;
+            di.IsPrimary  = (mi.dwFlags > 0);
+            di.IsCurrent  = (mi.szDevice == currentDevice);
+            monitors.Add(di);
+          }
+          return true;
+        }, IntPtr.Zero
+      );
+
+      var primary = monitors.FirstOrDefault(d => d.IsPrimary == true);
+      if (primary != null) primary.SDLIndex = 0;
+      if (primary.Index == 1) {
+        for (var i = 1; i < monitors.Count; i++) { monitors[i].SDLIndex = i; }
+      }
+      else if (primary.Index <= monitors.Count - 1) {
+        for (var i = primary.Index; i <= monitors.Count - 1; i++) { monitors[i].SDLIndex = i; }
+      }
+
+      while (EnumDisplayDevices(null, idx, ref device, size) )
+      {
+        if (device.StateFlags.HasFlag(EdsFlags.EDS_ATTACHEDTODESKTOP))
+        {
+          var isPrimary  = device.StateFlags.HasFlag(EdsFlags.EDS_PRIMARYDEVICE);
+          var isCurrent  = currentDevice != "" ? (device.DeviceName == currentDevice) : isPrimary;
+          var monitor = monitors.FirstOrDefault(d => d.DeviceName == device.DeviceName);
+          var deviceName = device.DeviceName; var deviceString = device.DeviceString;
+
+          EnumDisplayDevices(device.DeviceName, 0, ref device, 0);
+          var dev = new DisplayDevice()
+          {
+            Index        = list.Count + 1,
+            MonitorIndex = monitor.Index > 0 ? monitor.Index : list.Count + 1,
+            SDLIndex     = monitor.Index > 0 ? monitor.SDLIndex : list.Count + 1,
+            Id           = device.DeviceID,
+            DriverName   = deviceName,
+            DisplayName  = device.DeviceString,
+            AdapterName  = deviceString,
+            Bounds       = monitor.Bounds,
+            IsPrimary    = isPrimary,
+            IsCurrent    = isCurrent
+          };
+          list.Add(dev);
+        }
+        idx++;
+        device = new DISPLAY_DEVICE();
+        device.Initialize();
+      }
+      return list;
+    }
+
+    private static List<DisplaySettings> GetAllDisplaySettings(string deviceName = null)
+    {
+      var list = new List<DisplaySettings>();
+      DEVMODE mode = new DEVMODE();
+      mode.Initialize();
+      int idx = 0;
+
+      while (EnumDisplaySettings(StringExtensions.ToLPTStr(deviceName), idx, ref mode))
+        list.Add(CreateDisplaySettingsObject(idx++, mode));
+      return list;
+    }
+
+    private static DisplaySettings GetCurrentSettings(string deviceName = null)
+    {
+      return CreateDisplaySettingsObject(-1, GetDeviceMode(deviceName));
+    }
+
+    private static DisplaySettings GetCurrentDisplaySetting(string deviceName = null)
+    {
+      var mode = GetDeviceMode(deviceName);
+      return CreateDisplaySettingsObject(0, mode);
+    }
+
+    private static DisplaySettings CreateDisplaySettingsObject(int idx, DEVMODE mode)
+    {
+      return new DisplaySettings()
+      {
+        Index       = idx,
+        Width       = mode.dmPelsWidth,
+        Height      = mode.dmPelsHeight,
+        Refresh     = mode.dmDisplayFrequency,
+        Orientation = mode.dmDisplayOrientation,
+        FixedOutput = mode.dmDisplayFixedOutput
+      };
+    }
+
+    private static DEVMODE GetDeviceMode(string deviceName = null)
+    {
+      var mode = new DEVMODE();
+      mode.Initialize();
+
+      if (EnumDisplaySettings(StringExtensions.ToLPTStr(deviceName), Const.ENUM_CURRENT, ref mode))
+        return mode;
+      else
+        throw new InvalidOperationException(":(");
+    }
+
+    private static IntPtr consolehWnd = GetConsoleWindow();
+
+    private static ConsoleCtrlHandlerDelegate _consoleCtrlHandler;
+
+    private delegate bool ConsoleCtrlHandlerDelegate(int sig);
+
+    private delegate bool EnumDisplayMonitorsDelegate(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
+
+    [DllImport("kernel32", ExactSpelling = true)] private static extern IntPtr
+    GetConsoleWindow();
+
+    [DllImport("kernel32")] private static extern bool
+    SetConsoleCtrlHandler(ConsoleCtrlHandlerDelegate handler, bool add);
+
+    [DllImport("user32")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+
+    [DllImport("user32")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    GetCursorPos(out POINTL lpPoint);
+
+    [DllImport("user32", SetLastError = true)] private static extern IntPtr
+    MonitorFromPoint(POINTL pt, int dwFlags);
+
+    [DllImport("user32", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    GetMonitorInfo(IntPtr hMonitor, [In, Out] ref MONITORINFOEX lpmi);
+
+    [DllImport("user32", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    EnumDisplayMonitors(IntPtr hdc, IntPtr lpRect, EnumDisplayMonitorsDelegate lpfnEnum, IntPtr dwData);
+
+    [DllImport("user32")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    EnumDisplayDevices(string lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
+
+    [DllImport("user32", SetLastError=true, BestFitMapping=false, ThrowOnUnmappableChar=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool
+    EnumDisplaySettings(byte[] lpszDeviceName, [param: MarshalAs(UnmanagedType.U4)] int iModeNum, [In,Out] ref DEVMODE lpDevMode);
+
+    [DllImport("user32")] private static extern int
+    ChangeDisplaySettingsEx(string lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, CdsFlags dwflags, IntPtr lParam);
+
+    [DllImport("user32", CharSet = CharSet.Ansi)] private static extern int
+    GetWindowTextLength([In] IntPtr hWnd);
+
+    [DllImport("user32", CharSet = CharSet.Ansi)] private static extern int
+    GetWindowTextA([In] IntPtr hWnd, [In, Out] StringBuilder lpString, [In] int nMaxCount);
+
+    [DllImport("SHCore", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool
+    SetProcessDpiAwareness(int awareness); 
+  }
+
+  internal class WinEventBook : IDisposable
+  {
+    private const uint AllThreads = 0;
+    private const uint AllProcesses = 0;
+
+    public uint EventMin { get; private set; }
+    public uint EventMax { get; private set; }
+
+    public bool Booked { get { return RawBookHandle != IntPtr.Zero; } }
+
+    public bool SkipOwnThread {
+      get { return (_bookFlags & BookFlags.SKIPOWNTHREAD) == BookFlags.SKIPOWNTHREAD; }
+      set
+      {
+        if (Booked) { throw new InvalidOperationException("SkipOwnThread cannot be changed while booked."); }
+        _bookFlags = value ? _bookFlags | BookFlags.SKIPOWNTHREAD : _bookFlags & ~BookFlags.SKIPOWNTHREAD;
+      }
+    }
+
+    public bool SkipOwnProcess {
+      get { return (_bookFlags & BookFlags.SKIPOWNPROCESS) == BookFlags.SKIPOWNPROCESS; }
+      set
+      {
+        if (Booked) { throw new InvalidOperationException("SkipOwnProcess cannot be changed while booked."); }
+        _bookFlags = value ? _bookFlags | BookFlags.SKIPOWNPROCESS : _bookFlags & ~BookFlags.SKIPOWNPROCESS;
+      }
+    }
+
+    private BookFlags _bookFlags = BookFlags.OUTOFCONTEXT | BookFlags.SKIPOWNPROCESS | BookFlags.SKIPOWNTHREAD;
+    public event EventHandler<WinEventBookArgs> EventReceived;
+    public IntPtr RawBookHandle { get; private set; }
+    private WinEventProc eventHandler;
+
+    public WinEventBook() : this(Const.EVENT_MIN, Const.EVENT_MAX) { }
+    public WinEventBook(uint @event) : this(@event, @event) { }
+    public WinEventBook(uint eventMin, uint eventMax) { EventMin = eventMin; EventMax = eventMax; RawBookHandle = IntPtr.Zero; }
+
+    public void BookGlobal()
+    {
+      BookInternal(processId: AllProcesses, threadId: AllThreads, throwIfAlreadyBooked: true, throwOnFailure: true);
+    }
+    public bool TryBookGlobal()
+    {
+      return BookInternal(processId: AllProcesses, threadId: AllThreads, throwIfAlreadyBooked: false, throwOnFailure: false);
+    }
+    internal bool BookInternal(uint processId = AllProcesses, uint threadId = AllThreads, bool throwIfAlreadyBooked = true,
+                              bool throwOnFailure = true)
+    {
+      if (Booked) {
+        if (throwIfAlreadyBooked) { throw new InvalidOperationException("Event booked already."); }
+        return true;
+      }
+      eventHandler = new WinEventProc(OnWinEventProc);
+      RawBookHandle = SetWinEventHook(eventMin: EventMin, eventMax: EventMax, hmodWinEventProc: IntPtr.Zero,
+                                   lpfnWinEventProc: eventHandler, idProcess: processId, idThread: threadId, dwFlags: _bookFlags);
+      if (RawBookHandle != IntPtr.Zero) {
+        return true;
+      } else {
+        eventHandler = null;
+        if (throwOnFailure) { throw new Win32Exception(); }
+        return false;
+      }
+    }
+
+    public bool Unbook() { return UnbookInternal(throwIfNotBooked: true, throwOnFailure: true); }
+    public bool TryUnbook() { return UnbookInternal(throwIfNotBooked: false, throwOnFailure: false); }
+    internal bool UnbookInternal(bool throwIfNotBooked = true, bool throwOnFailure = true)
+    {
+      if (!Booked) {
+        if (throwIfNotBooked) { throw new InvalidOperationException("Event not booked."); }
+        return true;
+      }
+      
+      var result = UnhookWinEvent(RawBookHandle);
+
+      eventHandler = null;
+      RawBookHandle = IntPtr.Zero;
+
+      if (!result && throwOnFailure) { throw new Win32Exception(); }
+
+      return result;
+    }
+
+    protected virtual void OnWinEventProc(IntPtr hWinEventBook, uint eventType, IntPtr hwnd, uint idObject, int idChild,
+                                          uint dwEventThread, uint dwmsEventTime)
+    {
+      if (hWinEventBook != RawBookHandle || RawBookHandle == IntPtr.Zero)
+        return;
+
+      if (EventReceived != null)
+        EventReceived.Invoke(this, new WinEventBookArgs(
+          hWinEventBook, eventType, hwnd, idObject, idChild, dwEventThread, dwmsEventTime)
+        );
+    }
+
+    #region IDisposable
+    private bool _disposed;
+    protected virtual void Dispose(bool disposing)
+    {
+      if (!_disposed) { UnbookInternal(throwIfNotBooked: false, throwOnFailure: false); _disposed = true; }
+    }
+    ~WinEventBook() { Dispose(disposing: false); }
+    public void Dispose() { Dispose(disposing: true); GC.SuppressFinalize(this); }
+    #endregion
+
+    [Flags]
+    internal enum BookFlags : uint { OUTOFCONTEXT = 0x0000, SKIPOWNTHREAD = 0x0001, SKIPOWNPROCESS = 0x0002, INCONTEXT = 0x0004 }
+
+    internal delegate void WinEventProc(IntPtr hWinEventBook, uint eventType, IntPtr hwnd, uint idObject,
+                                      int idChild, uint dwEventThread, uint dwmsEventTime);
+
+    [DllImport("user32",CharSet = CharSet.Auto, SetLastError = true)] public static extern IntPtr
+    SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventProc lpfnWinEventProc, uint idProcess,
+                    uint idThread, BookFlags dwFlags);
+
+    [DllImport("user32", CharSet = CharSet.Auto, SetLastError = true)] public static extern bool
+    UnhookWinEvent(IntPtr hWinEventBook);
+  }
+
+  internal sealed class WinEventBookArgs : EventArgs
+  {
+    private const int CHILDID_SELF = 0;
+    public IntPtr BookHandle { get; private set; }
+    public uint EventType { get; private set; }
+    public IntPtr WindowHandle { get; private set; }
+    public uint ObjectId { get; private set; }
+    public int ChildId { get; private set; }
+    public uint EventThreadId { get; private set; }
+    public uint EventTime { get; private set; }
+    public DateTime EventDate { get { return DateTime.Now.AddMilliseconds(EventTime - Environment.TickCount); } }
+    public bool IsChildEvent { get { return !IsOwnEvent; } }
+    public bool IsOwnEvent { get { return ChildId == CHILDID_SELF; } }
+    public WinEventBookArgs(IntPtr bookHandle, uint eventType, IntPtr windowHandle, uint objectId,
+      int childId, uint eventThreadId, uint eventTime)
+    {
+      BookHandle = bookHandle; EventType = eventType; WindowHandle = windowHandle;
+      ObjectId = objectId; ChildId = childId; EventThreadId = eventThreadId; EventTime = eventTime;
+    }
+  }
+
+  internal class ReentrancySafeEventProcessor<T>
+  {
+    private const int Processing = 1;
+    private const int Idle = 0;
+    private int _processing = Idle;
+    private readonly Queue<T> _eventQueue = new Queue<T>();
+    private readonly Action<T> _eventProcessor;
+    public ReentrancySafeEventProcessor(Action<T> eventProcessor) { _eventProcessor = eventProcessor; }
+
+    public void EnqueueAndProcess(T eventData)
+    {
+      _eventQueue.Enqueue(eventData);
+      if (Interlocked.Exchange(ref _processing, Processing) == Processing) { return; }
+      ProcessQueue();
+    }
+
+    private void ProcessQueue()
+    {
+      try {
+        T data;
+        while (_eventQueue.TryDequeue(out data)) { _eventProcessor(data); }
+      } finally {
+        _processing = Idle;
+        if (!_eventQueue.IsEmpty() && Interlocked.Exchange(ref _processing, Processing) == Processing) { ProcessQueue(); }
+      }
+    }
+
+    public void FlushQueue() { _eventQueue.Clear(); }
+  }
+
+  internal static class QueueExtensions
+  {
+    public static bool TryDequeue<T>(this Queue<T> queue, out T result)
+    {
+      if (queue.Count == 0) { result = default(T); return false; } else { result = queue.Dequeue(); return true; }
+    }
+    public static bool IsEmpty<T>(this Queue<T> queue) { return queue.Count == 0; }
+  }
+
+  internal static class StringExtensions
+  {
+    public static byte[] ToLPTStr(string str)
+    {
+      return (str == null) ? null : Array.ConvertAll((str + '\0').ToCharArray(), Convert.ToByte);
+    }
+  }
+
+  internal class DisplayInfo
+  {
+    public int    Index      { get; set; }
+    public int    SDLIndex   { get; set; }
+    public string DeviceName { get; set; }
+    public int    Height     { get; set; }
+    public int    Width      { get; set; }
+    public RECT   Bounds     { get; set; }
+    public RECT   WorkArea   { get; set; }
+    public bool   IsPrimary  { get; set; }
+    public bool   IsCurrent  { get; set; }
+
+    public override string ToString()
+    {
+      return string.Format("{0} {1} {2} {3} {4} ({5},{6},{7},{8}){9}{10}", Index, SDLIndex, DeviceName, Height, Width,
+        Bounds.left, Bounds.top, Bounds.right, Bounds.bottom, IsPrimary ? " [primary]" : "", IsCurrent ? " [current]" : "");
+    }
+  }
+
+  internal class DisplayDevice
+  {
+    public int    Index        { get; set; }
+    public int    MonitorIndex { get; set; }
+    public int    SDLIndex     { get; set; }
+    public string Id           { get; set; }
+    public string DriverName   { get; set; }
+    public string DisplayName  { get; set; }
+    public string AdapterName  { get; set; }
+    public RECT   Bounds       { get; set; }
+    public bool   IsPrimary    { get; set; }
+    public bool   IsCurrent    { get; set; }
+
+    public override string ToString()
+    {
+      return ToString(false);
+    }
+    public string ToString(bool Detail)
+    {
+      if (Detail)
+      {
+        var sb = new System.Text.StringBuilder(9);
+        sb.AppendFormat(" Index:        {0}\n", Index);
+        sb.AppendFormat(" MonitorIndex: {0}\n", MonitorIndex);
+        sb.AppendFormat(" SDLIndex:     {0}\n", SDLIndex);
+        sb.AppendFormat(" Id:           {0}\n", Id);
+        sb.AppendFormat(" DriverName:   {0}\n", DriverName);
+        sb.AppendFormat(" DisplayName:  {0}\n", DisplayName);
+        sb.AppendFormat(" AdapterName:  {0}\n", AdapterName);
+        sb.AppendFormat(" Resolution:   {0} x {1}\n", Bounds.right - Bounds.left, Bounds.bottom - Bounds.top);
+        sb.AppendFormat(" Bounds:       {0},{1},{2},{3}\n", Bounds.left, Bounds.top, Bounds.right, Bounds.bottom);
+        sb.AppendFormat(" IsPrimary:    {0}\n", IsPrimary);
+        sb.AppendFormat(" IsCurrent:    {0}\n", IsCurrent);
+        return sb.ToString();
+      }
+      return string.Format(" {0} {1} {2} - {3}{4}{5}", MonitorIndex, SDLIndex, AdapterName, DisplayName,
+        IsPrimary ? " [primary]" : "", IsCurrent ? " [current]" : "");
+    }
+  }
+
+  internal class DisplaySettings
+  {
+    public int  Index       { get; set; }
+    public uint Width       { get; set; }
+    public uint Height      { get; set; }
+    public uint Refresh     { get; set; }
+    public uint Orientation { get; set; }
+    public uint FixedOutput { get; set; }
+
+    public override string ToString()
+    {
+      return ToString(false);
+    }
+    public string ToString(bool Detail)
+    {
+      var culture = System.Globalization.CultureInfo.CurrentCulture;
+      if (!Detail)
+        return string.Format(culture, "   {0,4} x {1,4}", Width, Height);
+
+      var degrees = Orientation == Const.DMDO_90  ? " 90\u00b0" : Orientation == Const.DMDO_180 ? " 180\u00b0" :
+        Orientation == Const.DMDO_270 ? " 270\u00b0" : "";
+      var scaling = FixedOutput == Const.DMDFO_CENTER ? " C" : FixedOutput == Const.DMDFO_STRETCH ? " F" : "";
+      return string.Format(culture, "   {0,4} x {1,4} {2,3}Hz {3}{4}", Width, Height, Refresh, degrees, scaling);
+    }
+
+    public override bool Equals(object d)
+    {
+      var disp = d as DisplaySettings;
+      return (disp.Width == Width && disp.Height == Height && disp.Refresh == Refresh && disp.Orientation == Orientation);
+    }
+
+    public override int GetHashCode()
+    {
+      return (string.Format("W{0}H{1}R{2}O{3}", Width, Height, Refresh, Orientation)).GetHashCode();
+    }
+  }
+
+  internal static class Vpk_Crc32
+  {
+    private static readonly uint[] Table =
+    {
+       0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3, 0x0EDB8832, 0x79DCB8A4,
+       0xE0D5E91E, 0x97D2D988, 0x09B64C2B, 0x7EB17CBD, 0xE7B82D07, 0x90BF1D91, 0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE,
+       0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7, 0x136C9856, 0x646BA8C0, 0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9,
+       0xFA0F3D63, 0x8D080DF5, 0x3B6E20C8, 0x4C69105E, 0xD56041E4, 0xA2677172, 0x3C03E4D1, 0x4B04D447, 0xD20D85FD, 0xA50AB56B,
+       0x35B5A8FA, 0x42B2986C, 0xDBBBC9D6, 0xACBCF940, 0x32D86CE3, 0x45DF5C75, 0xDCD60DCF, 0xABD13D59, 0x26D930AC, 0x51DE003A,
+       0xC8D75180, 0xBFD06116, 0x21B4F4B5, 0x56B3C423, 0xCFBA9599, 0xB8BDA50F, 0x2802B89E, 0x5F058808, 0xC60CD9B2, 0xB10BE924,
+       0x2F6F7C87, 0x58684C11, 0xC1611DAB, 0xB6662D3D, 0x76DC4190, 0x01DB7106, 0x98D220BC, 0xEFD5102A, 0x71B18589, 0x06B6B51F,
+       0x9FBFE4A5, 0xE8B8D433, 0x7807C9A2, 0x0F00F934, 0x9609A88E, 0xE10E9818, 0x7F6A0DBB, 0x086D3D2D, 0x91646C97, 0xE6635C01,
+       0x6B6B51F4, 0x1C6C6162, 0x856530D8, 0xF262004E, 0x6C0695ED, 0x1B01A57B, 0x8208F4C1, 0xF50FC457, 0x65B0D9C6, 0x12B7E950,
+       0x8BBEB8EA, 0xFCB9887C, 0x62DD1DDF, 0x15DA2D49, 0x8CD37CF3, 0xFBD44C65, 0x4DB26158, 0x3AB551CE, 0xA3BC0074, 0xD4BB30E2,
+       0x4ADFA541, 0x3DD895D7, 0xA4D1C46D, 0xD3D6F4FB, 0x4369E96A, 0x346ED9FC, 0xAD678846, 0xDA60B8D0, 0x44042D73, 0x33031DE5,
+       0xAA0A4C5F, 0xDD0D7CC9, 0x5005713C, 0x270241AA, 0xBE0B1010, 0xC90C2086, 0x5768B525, 0x206F85B3, 0xB966D409, 0xCE61E49F,
+       0x5EDEF90E, 0x29D9C998, 0xB0D09822, 0xC7D7A8B4, 0x59B33D17, 0x2EB40D81, 0xB7BD5C3B, 0xC0BA6CAD, 0xEDB88320, 0x9ABFB3B6,
+       0x03B6E20C, 0x74B1D29A, 0xEAD54739, 0x9DD277AF, 0x04DB2615, 0x73DC1683, 0xE3630B12, 0x94643B84, 0x0D6D6A3E, 0x7A6A5AA8,
+       0xE40ECF0B, 0x9309FF9D, 0x0A00AE27, 0x7D079EB1, 0xF00F9344, 0x8708A3D2, 0x1E01F268, 0x6906C2FE, 0xF762575D, 0x806567CB,
+       0x196C3671, 0x6E6B06E7, 0xFED41B76, 0x89D32BE0, 0x10DA7A5A, 0x67DD4ACC, 0xF9B9DF6F, 0x8EBEEFF9, 0x17B7BE43, 0x60B08ED5,
+       0xD6D6A3E8, 0xA1D1937E, 0x38D8C2C4, 0x4FDFF252, 0xD1BB67F1, 0xA6BC5767, 0x3FB506DD, 0x48B2364B, 0xD80D2BDA, 0xAF0A1B4C,
+       0x36034AF6, 0x41047A60, 0xDF60EFC3, 0xA867DF55, 0x316E8EEF, 0x4669BE79, 0xCB61B38C, 0xBC66831A, 0x256FD2A0, 0x5268E236,
+       0xCC0C7795, 0xBB0B4703, 0x220216B9, 0x5505262F, 0xC5BA3BBE, 0xB2BD0B28, 0x2BB45A92, 0x5CB36A04, 0xC2D7FFA7, 0xB5D0CF31,
+       0x2CD99E8B, 0x5BDEAE1D, 0x9B64C2B0, 0xEC63F226, 0x756AA39C, 0x026D930A, 0x9C0906A9, 0xEB0E363F, 0x72076785, 0x05005713,
+       0x95BF4A82, 0xE2B87A14, 0x7BB12BAE, 0x0CB61B38, 0x92D28E9B, 0xE5D5BE0D, 0x7CDCEFB7, 0x0BDBDF21, 0x86D3D2D4, 0xF1D4E242,
+       0x68DDB3F8, 0x1FDA836E, 0x81BE16CD, 0xF6B9265B, 0x6FB077E1, 0x18B74777, 0x88085AE6, 0xFF0F6A70, 0x66063BCA, 0x11010B5C,
+       0x8F659EFF, 0xF862AE69, 0x616BFFD3, 0x166CCF45, 0xA00AE278, 0xD70DD2EE, 0x4E048354, 0x3903B3C2, 0xA7672661, 0xD06016F7,
+       0x4969474D, 0x3E6E77DB, 0xAED16A4A, 0xD9D65ADC, 0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9,
+       0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD70693, 0x54DE5729, 0x23D967BF, 0xB3667A2E, 0xC4614AB8,
+       0x5D681B02, 0x2A6F2B94, 0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
+    };
+
+    public static uint Compute(byte[] buffer)
+    {
+      return ~buffer.Aggregate(0xFFFFFFFF, (current, t) => (current >> 8) ^ Table[t ^ (current & 0xff)]);
+    }
+  }
+
+  internal static class Const
+  {
+    public const short CCDEVICENAME = 32,  CCFORMNAME  = 32;
+
+    public const int SUCCESS       = 0,  ENUM_CURRENT  = -1,  MONITOR_DEFAULTTONEAREST = 0x00000002;
+    public const int DMDFO_DEFAULT = 0,  DMDFO_STRETCH =  1,  DMDFO_CENTER = 2;
+    public const int DMDO_DEFAULT  = 0,  DMDO_90       =  1,  DMDO_180     = 2,  DMDO_270 = 3;
+
+    public const uint EVENT_MIN = 0x00000001,  EVENT_MAX = 0x7FFFFFFF,  EVENT_SYSTEM_FOREGROUND = 0x0003;
+  }
+
+  [Flags()]
+  internal enum EdsFlags : int
+  {
+    EDS_ATTACHEDTODESKTOP = 0x00000001,  EDS_MULTIDRIVER   = 0x00000002,  EDS_PRIMARYDEVICE = 0x00000004,
+    EDS_MIRRORINGDRIVER   = 0x00000008,  EDS_VGACOMPATIBLE = 0x00000010,  EDS_REMOVABLE     = 0x00000020,
+    EDS_MODESPRUNED       = 0x08000000,  EDS_REMOTE        = 0x04000000,  EDS_DISCONNECT    = 0x02000000
+  }
+
+  [Flags()]
+  internal enum CdsFlags : uint
+  {
+    CDS_NONE            = 0x00000000,  CDS_UPDATEREGISTRY      = 0x00000001,  CDS_TEST                 = 0x00000002,
+    CDS_FULLSCREEN      = 0x00000004,  CDS_GLOBAL              = 0x00000008,  CDS_SET_PRIMARY          = 0x00000010,
+    CDS_VIDEOPARAMETERS = 0x00000020,  CDS_ENABLE_UNSAFE_MODES = 0x00000100,  CDS_DISABLE_UNSAFE_MODES = 0x00000200,
+    CDS_RESET           = 0x40000000,  CDS_RESET_EX            = 0x20000000,  CDS_NORESET              = 0x10000000
+  }
+
+  [Flags()]
+  internal enum DmFlags : int
+  {
+    DM_ORIENTATION   = 0x00000001,  DM_PAPERSIZE          = 0x00000002,  DM_PAPERLENGTH        = 0x00000004,
+    DM_PAPERWIDTH    = 0x00000008,  DM_SCALE              = 0x00000010,  DM_POSITION           = 0x00000020,
+    DM_NUP           = 0x00000040,  DM_DISPLAYORIENTATION = 0x00000080,  DM_COPIES             = 0x00000100,
+    DM_DEFAULTSOURCE = 0x00000200,  DM_PRINTQUALITY       = 0x00000400,  DM_COLOR              = 0x00000800,
+    DM_DUPLEX        = 0x00001000,  DM_YRESOLUTION        = 0x00002000,  DM_TTOPTION           = 0x00004000,
+    DM_COLLATE       = 0x00008000,  DM_FORMNAME           = 0x00010000,  DM_LOGPIXELS          = 0x00020000,
+    DM_BITSPERPEL    = 0x00040000,  DM_PELSWIDTH          = 0x00080000,  DM_PELSHEIGHT         = 0x00100000,
+    DM_DISPLAYFLAGS  = 0x00200000,  DM_DISPLAYFREQUENCY   = 0x00400000,  DM_ICMMETHOD          = 0x00800000,
+    DM_ICMINTENT     = 0x01000000,  DM_MEDIATYPE          = 0x02000000,  DM_DITHERTYPE         = 0x04000000,
+    DM_PANNINGWIDTH  = 0x08000000,  DM_PANNINGHEIGHT      = 0x10000000,  DM_DISPLAYFIXEDOUTPUT = 0x20000000
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  internal struct POINTL { public int x; public int y; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  internal struct RECT { public int left; public int top; public int right; public int bottom; }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+  internal struct DISPLAY_DEVICE
+  {
+    [MarshalAs(UnmanagedType.U4)]                       public int      cb;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)]  public string   DeviceName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string   DeviceString;
+    [MarshalAs(UnmanagedType.U4)]                       public EdsFlags StateFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string   DeviceID;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string   DeviceKey;
+    public void Initialize()
+    {
+      this.DeviceName   = new string(new char[32]);
+      this.DeviceString = new string(new char[128]);
+      this.DeviceID     = new string(new char[128]);
+      this.DeviceKey    = new string(new char[128]);
+      this.cb           = Marshal.SizeOf(this);
+    }
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+  internal struct DEVMODE
+  {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=Const.CCDEVICENAME)]
+                                  public string  dmDeviceName;
+    [MarshalAs(UnmanagedType.U2)] public ushort  dmSpecVersion;
+    [MarshalAs(UnmanagedType.U2)] public ushort  dmDriverVersion;
+    [MarshalAs(UnmanagedType.U2)] public ushort  dmSize;
+    [MarshalAs(UnmanagedType.U2)] public ushort  dmDriverExtra;
+    [MarshalAs(UnmanagedType.U4)] public DmFlags dmFields;
+                                  public POINTL  dmPosition;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmDisplayOrientation;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmDisplayFixedOutput;
+    [MarshalAs(UnmanagedType.I2)] public short   dmColor;
+    [MarshalAs(UnmanagedType.I2)] public short   dmDuplex;
+    [MarshalAs(UnmanagedType.I2)] public short   dmYResolution;
+    [MarshalAs(UnmanagedType.I2)] public short   dmTTOption;
+    [MarshalAs(UnmanagedType.I2)] public short   dmCollate;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=Const.CCFORMNAME)]
+                                  public string  dmFormName;
+    [MarshalAs(UnmanagedType.U2)] public ushort  dmLogPixels;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmBitsPerPel;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmPelsWidth;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmPelsHeight;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmDisplayFlags;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmDisplayFrequency;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmICMMethod;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmICMIntent;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmMediaType;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmDitherType;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmReserved1;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmReserved2;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmPanningWidth;
+    [MarshalAs(UnmanagedType.U4)] public uint    dmPanningHeight;
+    public void Initialize()
+    {
+      this.dmDeviceName = new string(new char[Const.CCDEVICENAME]);
+      this.dmFormName   = new string(new char[Const.CCFORMNAME]);
+      this.dmSize       = (ushort)Marshal.SizeOf(this);
+    }
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto, Pack = 4)]
+  internal struct MONITORINFOEX
+  {
+    public uint cbSize;
+    public RECT rcMonitor;
+    public RECT rcWork;
+    public int dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+    public void Initialize()
+    {
+      this.rcMonitor = new RECT();
+      this.rcWork    = new RECT();
+      this.szDevice  = new string(new char[32]);
+      this.cbSize    = (uint)Marshal.SizeOf(this);
+    }
+  }
+}
+<#:LIBRARY1: end #>
+} #_press_Enter_if_pasted_in_powershell
