@@ -22,8 +22,9 @@ Derived from the original scripts by [AveYo](https://github.com/AveYo/Gaming/blo
 - **"Nuclear" Steam Stripping**: Restarts Steam with aggressive flags (`-cef-single-process`, `-noshaders`, etc.) to reduce RAM/CPU footprint by up to 70%.
 - **Direct Win32 Display Control**: Uses an embedded C# library (`AveYo.SetRes`) to bypass the slow Windows Settings UI and communicate directly with display drivers.
 - **Robust State Restoration**: Captures immutable native desktop constants _before_ launch. This prevents "refresh rate snapping" and ensures a perfect return to your desktop environment.
+- **Strict Passive Mode**: Refactored logic to completely bypass Win32 Display API probes if active resolution switching is disabled. This prevents NVIDIA drivers from "snapping" the refresh rate from 165Hz to 144Hz.
 - **Intelligent Alt-Tab Sync**: Automatically detects window focus and switches desktop resolution to match the game in real-time, preventing the "black screen hang" during Alt-Tabs.
-- **Throttled Monitoring**: Optimization of the WMI Registry Watcher to ensure zero CPU impact during long gaming sessions.
+- **Throttled Monitoring**: Optimized WMI Registry Watcher to ensure zero CPU impact during long gaming sessions.
 
 ### 🎮 Game-Specific Logic
 
@@ -95,17 +96,13 @@ You can easily modify the behavior of the launchers by editing the variables at 
 
 ## 🧠 Technical Deep Dive
 
-### High-Precision Refresh Rates
+### Proximity-Based Refresh Matching
 
-Standard scripts often truncate refresh rates (e.g., 164.9Hz becoming 164Hz). Our launchers use high-precision mathematical rounding to ensure Steam's internal fixed-point Hz format perfectly matches your hardware:
+Standard scripts often fail if the monitor reports non-integer timings (e.g., 164.9Hz). Our updated `SetRes` library uses a proximity-based matching algorithm that prioritizes the absolute closest available mode, ensuring you always lock onto your maximum hardware capability (e.g., 165Hz) instead of falling back to standard 144Hz modes.
 
-```powershell
-$denom = 1000; $numer = [int]([math]::Round($refresh * $denom))
+```csharp
+var set = Refresh == 0 ? filtered.FirstOrDefault() : filtered.OrderBy(d => Math.Abs((decimal)d.Refresh - Refresh)).FirstOrDefault();
 ```
-
-### The "Snap" Prevention
-
-The launcher captures your native state as constant variables _before_ any mutation occurs. This protects against driver "snapping" where Windows might revert to a lower default refresh rate (like 144Hz) if the GPU driver resets during game initialization. Your desktop will always return to its true native state (e.g., 165Hz, 240Hz, or 360Hz).
 
 ### Performance Engineering
 
