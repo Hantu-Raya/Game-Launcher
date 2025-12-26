@@ -255,12 +255,8 @@ if ((gi $path1 -force -ea 0).VersionInfo.FileVersion -ne $version1) { del $path1
 }
 try {Import-Module $path1} catch {del $path1 -force -ea 0; " ERROR importing $library1, run script again! "; sleep 7; return }
 
-if ($do_not_set_desktop_res_to_match_game -le 0) {
-  $display = [AveYo.SetRes]::Init($screen)
-  $sdl_idx = $display[0];  $screen = $display[1];  $primary = $display[2] -gt 0;  $multimon = $display[3] -gt 1
-} else {
-  $sdl_idx = 0; $screen = 1; $primary = $true; $multimon = $false
-}
+$display = [AveYo.SetRes]::Init($screen)
+$sdl_idx = $display[0];  $screen = $display[1];  $primary = $display[2] -gt 0;  $multimon = $display[3] -gt 1
 
 if ($env:SetResBack) {
   $restore = $env:SetResBack -split ','
@@ -275,26 +271,24 @@ if ($env:SetResBack) {
   0,1 |foreach { [Environment]::SetEnvironmentVariable("SetResBack","",$_) }
 }
 
-if ($do_not_set_desktop_res_to_match_game -le 0) {
-  $oldres  = [AveYo.SetRes]::List(1, $screen)
+$oldres  = [AveYo.SetRes]::List(1, $screen)
 
-  # Capture original resolution constants BEFORE any change attempt to avoid "snapping" bugs
-  $restore_width   = $oldres[2]
-  $restore_height  = $oldres[3]
-  $restore_refresh = $oldres[4]
+# Capture original resolution constants BEFORE any change attempt to avoid "snapping" bugs
+$restore_width   = $oldres[2]
+$restore_height  = $oldres[3]
+$restore_refresh = $oldres[4]
 
-  if ($width   -le 0) { $width  = $oldres[2] }
-  if ($height  -le 0) { $height = $oldres[3] }
-  if ($refresh -le 0) { $max_refresh = [AveYo.SetRes]::List(0, $screen, $width, $width, $height); $refresh = $max_refresh[7] }
-  $newres  = [AveYo.SetRes]::Change(1, $screen, $width, $height, $refresh, 1)
-  $width   = $newres[5]
-  $height  = $newres[6]
-  $refresh = $newres[7]
+if ($width   -le 0) { $width  = $oldres[2] }
+if ($height  -le 0) { $height = $oldres[3] }
+if ($refresh -le 0) { $max_refresh = [AveYo.SetRes]::List(0, $screen, $width, $width, $height); $refresh = $max_refresh[7] }
+$newres  = [AveYo.SetRes]::Change(1, $screen, $width, $height, $refresh, 1)
+$width   = $newres[5]
+$height  = $newres[6]
+$refresh = $newres[7]
 
-  if ($do_not_restore_res_use_max_available -ge 1) {
-    # Override: Restore to the monitor's MAXIMUM supported resolution instead of the original state
-    $restore_width = $oldres[5]; $restore_height = $oldres[6]; $restore_refresh = $oldres[7]
-  }
+if ($do_not_restore_res_use_max_available -ge 1) {
+  # Override: Restore to the monitor's MAXIMUM supported resolution instead of the original state
+  $restore_width = $oldres[5]; $restore_height = $oldres[6]; $restore_refresh = $oldres[7]
 }
 $sameres = $width -eq $restore_width -and $height -eq $restore_height -and $refresh -eq $restore_refresh
 $ratio   = $width / $height
@@ -452,9 +446,7 @@ if ($do_not_set_desktop_res_to_match_game -le 0) {
       write-host " Game running. Monitoring..." -fore Green
       while (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) { sleep 1 }
       write-host " Game closed. Restoring Resolution..." -fore Green
-      # Passive Mode: We didn't change the resolution, so we don't restore it.
-      # This preserves the 165Hz session in case the Init/List calls were skipped to avoid driver snapping.
-      # [AveYo.SetRes]::Change(0, $screen, $restore_width, $restore_height, $restore_refresh, 0)
+      [AveYo.SetRes]::Change(0, $screen, $restore_width, $restore_height, $restore_refresh, 0)
   }
 }
               var devices = GetAllDisplayDevices();
@@ -615,7 +607,9 @@ if ($do_not_set_desktop_res_to_match_game -le 0) {
         .Where(d => d.Width == Width && d.Height == Height && d.Orientation == current.Orientation)
         .OrderByDescending(d => d.Width).ThenByDescending(d => d.Refresh).ToList();
 
-      var set = Refresh == 0 ? filtered.FirstOrDefault() : filtered.OrderBy(d => Math.Abs((decimal)d.Refresh - Refresh)).FirstOrDefault();
+      var ref1 = filtered.FirstOrDefault(d => d.Refresh == (uint)Decimal.Truncate(Refresh));
+      var ref2 = filtered.FirstOrDefault(d => d.Refresh == (uint)Decimal.Truncate(Refresh + 1));
+      var set = Refresh == 0 ? filtered.FirstOrDefault() : ref1 != null ? ref1 : ref2 != null ? ref2 : filtered.FirstOrDefault();
       if (set == null)
       {
         if (Verbose != 0) Console.WriteLine(" No matching display mode!\n");
