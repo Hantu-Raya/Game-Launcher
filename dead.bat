@@ -16,7 +16,8 @@ $convars = @{
 }
 $extra_launch_options = @()
 $extra_launch_options+= '-noreflex -noantilag'
-$extra_launch_options+= '-fastambient -dx11 -noipx -nojoy -noheap -novid -noquicktime -limitvsconst -useforcedmparms -novr -favor_consistent_framerate -nosteamcontroller -particles 1 -precachefontchars -high -dev -no_environment_maps +exec auto.cfg -m_rawinput 1 -noassert -convars_visible_by_default +@panorama_min_comp_layer_cache_cost_TURNED_OFF 256 -forcenovsync -limitvsconst -mat_disable_bloom -nod3d9ex1 -nohltv -no-browser +vprof_off +iv_off'
+$extra_launch_options+= '+map new_player_basics'
+$extra_launch_options+= '-fastambient -dx11 -noipx -nojoy -noheap -novid -noquicktime -limitvsconst -useforcedmparms -novr -favor_consistent_framerate -nosteamcontroller -particles 1 -precachefontchars -high -dev +exec auto.cfg -m_rawinput 1 -noassert -convars_visible_by_default +@panorama_min_comp_layer_cache_cost_TURNED_OFF 256 -forcenovsync -limitvsconst -mat_disable_bloom -nod3d9ex1 -nohltv -no-browser +vprof_off +iv_off'
 
 
 $force_screen    = -1
@@ -393,10 +394,18 @@ if ($do_not_minimize_window_while_waiting -le 0) {
   sleep 5; powershell -win 2 -nop -c ';'
 } 
 
+$proc_name = $APPNAME
 if ($auto_start -ge 1) {
-  ni "HKCU:\Software\Classes\.steam_$APPNAME\shell\open\command" -force >''
-  sp "HKCU:\Software\Classes\.steam_$APPNAME\shell\open\command" "(Default)" "$_q$STEAM\steam.exe$_q $AUTO"
-  $L = "$STEAM\.steam_$APPNAME"; if (!(test-path $L)) { set-content $L "" } ; start explorer -args "$_q$L$_q"
+  $bypass = "$GAMEROOT\$GAMEBIN\launcher.exe"
+  if (Test-Path $bypass) {
+    Write-Host " Using Bypass Launcher " -fore Magenta
+    Start-Process $bypass -Args "$video_mode $extra_launch_options" -WorkingDirectory "$GAMEROOT\$GAMEBIN"
+    $proc_name = "launcher"
+  } else {
+    ni "HKCU:\Software\Classes\.steam_$APPNAME\shell\open\command" -force >''
+    sp "HKCU:\Software\Classes\.steam_$APPNAME\shell\open\command" "(Default)" "$_q$STEAM\steam.exe$_q $AUTO"
+    $L = "$STEAM\.steam_$APPNAME"; if (!(test-path $L)) { set-content $L "" } ; start explorer -args "$_q$L$_q"
+  }
 }
 
 if ($do_not_set_desktop_res_to_match_game -le 0) {
@@ -411,9 +420,9 @@ if ($do_not_set_desktop_res_to_match_game -le 0) {
 
   # FALLBACK: If the C# watcher failed or Deadlock didn't update the Registry key,
   # we wait for the actual PROCESS to close. This ensures resolution restores.
-  if (Get-Process -Name "deadlock" -ErrorAction SilentlyContinue) {
-    write-host " Waiting for deadlock process to close..." -fore Yellow
-    Wait-Process -Name "deadlock" -ErrorAction SilentlyContinue
+  if (Get-Process -Name $proc_name -ErrorAction SilentlyContinue) {
+    write-host " Waiting for $proc_name process to close..." -fore Yellow
+    Wait-Process -Name $proc_name -ErrorAction SilentlyContinue
   }
 
   # FALLBACK 2: Explicitly restore resolution no matter what happens
@@ -426,13 +435,13 @@ if ($do_not_set_desktop_res_to_match_game -le 0) {
   
   write-host " [Passive Mode] Waiting for game process to start..." -fore Yellow
   $retries = 0
-  while (-not (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) -and $retries -lt 30) {
+  while (-not (Get-Process -Name $proc_name -ErrorAction SilentlyContinue) -and $retries -lt 30) {
       sleep 1; $retries++
   }
 
-  if (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) {
+  if (Get-Process -Name $proc_name -ErrorAction SilentlyContinue) {
       write-host " Game running. Monitoring until exit..." -fore Green
-      while (Get-Process -Name $APPNAME -ErrorAction SilentlyContinue) {
+      while (Get-Process -Name $proc_name -ErrorAction SilentlyContinue) {
           sleep 3
       }
       write-host " Game closed. Restoring Desktop Resolution..." -fore Green
